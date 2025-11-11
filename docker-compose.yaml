@@ -1,0 +1,31 @@
+services:
+  vault:
+    image: hashicorp/vault:latest
+    container_name: vault
+    ports:
+      - "8200:8200"
+    cap_add:
+      - IPC_LOCK
+    volumes:
+      - ./vault/config:/vault/config
+      - ./vault/data:/vault/data
+      - ./vault/tls:/vault/tls
+    command: vault server -config=/vault/config/vault.hcl
+    environment:
+      VAULT_ADDR: "http://127.0.0.1:8200"
+    restart: unless-stopped
+
+  freeradius:
+    image: freeradius/freeradius-server:latest-alpine
+    container_name: freeradius
+    ports:
+      - "1812:1812/udp"
+      - "1813:1813/udp"
+    volumes:
+      - ./radius/eap:/opt/etc/raddb/mods-available/eap:ro
+      - ./radius/default:/opt/etc/raddb/sites-available/default:ro
+      - ./radius/clients.conf:/opt/etc/raddb/clients.conf:ro
+      - ./radius/ssl/private:/etc/ssl/private:ro
+      - ./radius/ssl/certs:/etc/ssl/certs:ro
+    command: ["radiusd", "-X"]
+    restart: unless-stopped
