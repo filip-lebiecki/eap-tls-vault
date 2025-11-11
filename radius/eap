@@ -1,0 +1,21 @@
+eap {
+    default_eap_type = tls
+    timer_expire = 60
+    ignore_unknown_eap_types = no
+    max_sessions = ${max_requests}
+
+    tls-config tls-common {
+        private_key_file = "/etc/ssl/private/radius.key"
+        certificate_file = "/etc/ssl/certs/radius.pem"
+        ca_file = "/etc/ssl/certs/ca_chain.pem"
+        require_client_cert = yes
+        cipher_list = "DEFAULT"
+        cipher_server_preference = no
+        tls_min_version = "1.2"
+        tls_max_version = "1.2"
+    }
+
+    tls {
+        tls = tls-common
+    }
+}
