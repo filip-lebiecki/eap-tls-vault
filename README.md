@@ -133,7 +133,11 @@ rm pki.json pki_int.json pki_int.csr
 ### Generate role for RADIUS and Certificate for RADIUS
 
 ```
-TODO
+vault write pki_int/roles/radius_role allowed_domains="radius.wifi.local" allow_subdomains=false allow_bare_domains=true allow_wildcard_certificates=false enforce_hostnames=true allow_any_name=false allow_localhost=false max_ttl="365d" key_type=ec
+vault write -format=json pki_int/issue/radius_role common_name="radius.wifi.local" ttl="365d" | tee radius.json
+jq -r .data.certificate radius.json | tee radius.pem
+jq -r .data.private_key radius.json | tee radius.key
+rm radius.json
 ```
 
 ### Generate role for Client and Certificate for Client
