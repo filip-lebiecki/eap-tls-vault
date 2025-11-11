@@ -1,4 +1,4 @@
-# EAP-TLS with HashiCorp Vault
+# EAP-TLS with HashiCorp Vault and FreeRadius
 
 ### Install HashiCorp Vault
 
