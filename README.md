@@ -143,7 +143,12 @@ rm radius.json
 ### Generate role for Client and Certificate for Client
 
 ```
-TODO
+vault write pki_int/roles/client_role allowed_domains="client.wifi.local" allowed_user_ids="client" allow_subdomains=false allow_bare_domains=true allow_wildcard_certificates=false enforce_hostnames=true allow_any_name=false allow_localhost=false max_ttl="30d" key_type=ec
+vault write -format=json pki_int/issue/client_role common_name="client.wifi.local" user_ids="client" ttl="30d" | tee client.json
+jq -r .data.certificate client.json | tee client.pem
+jq -r .data.private_key client.json | tee client.key
+openssl x509 -in client.pem -noout -text
+rm client.json
 ```
 
 ### Install FreeRadius
