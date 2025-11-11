@@ -130,7 +130,15 @@ rm pki.json pki_int.json pki_int.csr
 
 ### Generate role for RADIUS and Certificate for RADIUS
 
+```
+TODO
+```
+
 ### Generate role for Client and Certificate for Client
+
+```
+TODO
+```
 
 ### Install FreeRadius
 
