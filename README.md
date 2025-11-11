@@ -114,15 +114,15 @@ export VAULT_ADDR='http://127.0.0.1:8200'
 vault login
 vault secrets enable pki
 vault secrets tune -max-lease-ttl="3650d" pki
-vault write -format=json pki/root/generate/internal common_name="WiFi Root CA" ttl=3650d key_type=ec > pki.json
-jq -r .data.certificate pki.json > ca.pem
+vault write -format=json pki/root/generate/internal common_name="WiFi Root CA" ttl=3650d key_type=ec | tee pki.json
+jq -r .data.certificate pki.json | tee ca.pem
 openssl x509 -in ca.pem -noout -text
 vault secrets enable -path=pki_int pki
 vault secrets tune -max-lease-ttl="3650d" pki_int
-vault write -format=json pki_int/intermediate/generate/internal common_name="WiFi Intermediate CA" ttl=3850d key_type=ec > pki_int.json
-jq -r .data.csr pki_int.json > pki_int.csr
-vault write -format=json pki/root/sign-intermediate csr=@pki_int.csr format=pem_bundle ttl=3850d > signed_int.json
-jq -r .data.certificate signed_int.json > ca_int.pem
+vault write -format=json pki_int/intermediate/generate/internal common_name="WiFi Intermediate CA" ttl=3850d key_type=ec | tee pki_int.json
+jq -r .data.csr pki_int.json | tee pki_int.csr
+vault write -format=json pki/root/sign-intermediate csr=@pki_int.csr format=pem_bundle ttl=3850d | tee signed_int.json
+jq -r .data.certificate signed_int.json | tee ca_int.pem
 openssl x509 -in ca_int.pem -noout -text
 vault write pki_int/intermediate/set-signed certificate=@ca_int.pem
 openssl verify -CAfile ca.pem ca_int.pem
