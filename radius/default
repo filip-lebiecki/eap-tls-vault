@@ -1,0 +1,53 @@
+server default {
+    listen {
+        type = auth
+        ipaddr = *
+        port = 0
+    }
+
+    listen {
+        type = acct
+        ipaddr = *
+        port = 0
+    }
+
+    authorize {
+        eap {
+            ok = return
+        }
+    }
+
+    authenticate {
+        eap
+    }
+
+    preacct {
+        acct_unique
+    }
+
+    accounting {
+        detail
+    }
+
+    post-auth {
+        if (TLS-Client-Cert-Common-Name !~ /^(client|client2)\.wifi\.local$/) {
+            reject
+        }
+
+        update {
+            &reply: += &session-state:
+        }
+
+        remove_reply_message_if_eap
+
+        Post-Auth-Type REJECT {
+            remove_reply_message_if_eap
+        }
+
+        if (EAP-Key-Name && &reply:EAP-Session-Id) {
+            update reply {
+                &EAP-Key-Name := &reply:EAP-Session-Id
+            }
+        }
+    }
+}
