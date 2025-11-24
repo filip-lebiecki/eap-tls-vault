@@ -1,3 +1,4 @@
+# /etc/vault.d/vault-agent.hcl
 vault {
   # HTTP
   # address = "http://192.168.80.83:8200"
