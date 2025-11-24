@@ -665,6 +665,790 @@ MIT License - Feel free to use and modify for your needs.
 
 This setup is for educational and demonstration purposes. Always conduct thorough security audits and testing before deploying in production environments.
 
+# Automated Certificate Lifecycle with Vault Agent
+
+## 🎯 Overview
+
+The previous setup worked great for manually issuing certificates, but had a critical flaw: **human intervention**. With 30-day certificate validity, every device needs manual renewal every month. This doesn't scale beyond a lab environment.
+
+**Vault Agent solves this by:**
+- ✅ Automatically fetching certificates from Vault
+- ✅ Proactively renewing certificates before expiration
+- ✅ Managing authentication tokens without manual intervention
+- ✅ Running as a background service on each endpoint
+- ✅ Operating securely over TLS
+
+## 📋 Prerequisites
+
+- Completed HashiCorp Vault and FreeRADIUS setup
+- Ubuntu 24.04 (or similar Linux distribution)
+- Root or sudo access on client machines
+- TLS-enabled Vault server (covered in this guide)
+
+## 🏗️ Architecture
+
+```
+┌──────────────────────────────────────────────────────────┐
+│  Client Device (Laptop/Server)                           │
+│  ┌────────────────────────────────────────────────────┐  │
+│  │  Vault Agent (systemd service)                     │  │
+│  │  - Authenticates via AppRole                       │  │
+│  │  - Manages token lifecycle                         │  │
+│  │  - Fetches & renews certificates                   │  │
+│  └────────────────┬───────────────────────────────────┘  │
+│                   │                                       │
+│  ┌────────────────▼───────────────────────────────────┐  │
+│  │  /var/lib/vault-agent/certs/                       │  │
+│  │  - client.pem (auto-renewed)                       │  │
+│  │  - client.key (auto-renewed)                       │  │
+│  └────────────────────────────────────────────────────┘  │
+└──────────────────────┬───────────────────────────────────┘
+                       │ HTTPS (TLS)
+                       │ AppRole Auth
+                       │ Certificate Requests
+                       ▼
+        ┌──────────────────────────────┐
+        │  HashiCorp Vault Server      │
+        │  - Issues certificates       │
+        │  - Validates AppRole         │
+        │  - Enforces policies         │
+        └──────────────────────────────┘
+```
+
+## 🔄 Certificate Renewal Triggers
+
+Vault Agent automatically renews certificates in three scenarios:
+
+1. **Agent Restart**: Certificate is immediately renewed when the service restarts
+2. **Validity Threshold**: Renews when certificate reaches 90% of its validity period
+   - For 30-day cert: renews 3 days before expiration
+   - Provides safety buffer for network issues or failures
+3. **Token Max TTL**: Forces renewal when authentication token hits maximum lifetime
+
+## 🚀 Installation Steps
+
+### 1. Install Vault Binary on Client
+
+```bash
+# Check OS version
+lsb_release -a
+
+# Add HashiCorp repository
+wget -O- https://apt.releases.hashicorp.com/gpg | \
+  gpg --dearmor | \
+  sudo tee /usr/share/keyrings/hashicorp-archive-keyring.gpg
+
+echo "deb [arch=$(dpkg --print-architecture) signed-by=/usr/share/keyrings/hashicorp-archive-keyring.gpg] https://apt.releases.hashicorp.com $(grep -oP '(?<=UBUNTU_CODENAME=).*' /etc/os-release || lsb_release -cs) main" | \
+  sudo tee /etc/apt/sources.list.d/hashicorp.list
+
+# Install Vault
+sudo apt update && sudo apt install vault
+
+# Verify installation
+vault --version
+```
+
+### 2. Configure Vault Client
+
+```bash
+# Set Vault server address
+export VAULT_ADDR='http://192.168.12.230:8200'
+
+# Check Vault status (no auth required)
+vault status
+
+# Login with root token (for setup only)
+vault login
+# Enter your root token
+
+# Verify authentication
+vault token lookup
+cat ~/.vault-token
+```
+
+### 3. Test Manual Certificate Operations
+
+```bash
+# Fetch Root CA
+vault read -format=json pki/cert/ca | \
+  jq -r .data.certificate | \
+  tee ca.pem
+
+# Fetch Intermediate CA
+vault read -format=json pki_int/cert/ca | \
+  jq -r .data.certificate | \
+  tee ca_int.pem
+
+# Create CA chain
+cat ca.pem ca_int.pem | tee ca_chain.pem
+
+# List available roles
+vault list pki_int/roles
+
+# View role details
+vault read pki_int/roles/client_role
+
+# Issue a client certificate manually
+vault write -format=json pki_int/issue/client_role \
+  common_name="client.wifi.local" \
+  user_ids="client" \
+  ttl="30d" | \
+  tee client.json | jq
+
+# Extract certificate and key
+jq -r .data.certificate client.json | tee client.pem
+jq -r .data.private_key client.json | tee client.key
+
+# Verify certificate
+openssl x509 -in client.pem -noout -text
+
+# Cleanup
+rm client.json
+```
+
+## 🔐 Security Configuration
+
+### 4. Create Vault Policy
+
+Policies enforce least-privilege access control. Each client should only be able to issue their own certificates.
+
+**Create policy file:**
+
+```bash
+cat > client-policy.hcl <<'EOF'
+# Allow issuing certificates using client_role
+path "pki_int/issue/client_role" {
+  capabilities = ["create", "update"]
+}
+
+# Allow reading root CA certificate
+path "pki/cert/ca" {
+  capabilities = ["read"]
+}
+
+# Allow reading intermediate CA certificate
+path "pki_int/cert/ca" {
+  capabilities = ["read"]
+}
+EOF
+```
+
+**Apply policy:**
+
+```bash
+# Create policy in Vault
+vault policy write client-policy client-policy.hcl
+
+# Verify policy was created
+vault policy list
+vault policy read client-policy
+```
+
+**Test policy restrictions:**
+
+```bash
+# Create token with policy restriction
+vault token create \
+  -policy=client-policy \
+  -ttl=1h \
+  -explicit-max-ttl=24h
+
+# Copy the token and login in a new terminal
+export VAULT_ADDR='http://192.168.12.230:8200'
+vault login
+# Paste the token
+
+# Test allowed operations
+vault read pki_int/cert/ca  # Should work
+
+# Test denied operations
+vault list pki_int/certs  # Should fail: permission denied
+
+# Test certificate issuance (allowed)
+vault write -format=json pki_int/issue/client_role \
+  common_name="client.wifi.local" \
+  user_ids="client" \
+  ttl="30d" | tee client.json | jq
+
+# Try to issue RADIUS server cert (denied)
+vault write -format=json pki_int/issue/radius_role \
+  common_name="radius.wifi.local" \
+  ttl="30d"  # Should fail: permission denied
+```
+
+### 5. Configure AppRole Authentication
+
+AppRole provides secure, automated authentication for machines without human intervention.
+
+```bash
+# Enable AppRole auth method
+vault auth enable approle
+vault auth list
+
+# Create AppRole with client policy
+vault write auth/approle/role/app-role \
+  policies=client-policy \
+  token_ttl=1h \
+  token_max_ttl=24h
+
+# Verify AppRole was created
+vault list auth/approle/role
+
+# Get Role ID (stable, like a username)
+vault read auth/approle/role/app-role/role-id
+# Save this output
+
+# Generate Secret ID (dynamic, like a password)
+vault write -f auth/approle/role/app-role/secret-id
+# Save this output
+```
+
+**Test AppRole authentication:**
+
+```bash
+# In a new terminal, authenticate using AppRole
+ROLE_ID="<your-role-id>"
+SECRET_ID="<your-secret-id>"
+
+vault write auth/approle/login \
+  role_id="$ROLE_ID" \
+  secret_id="$SECRET_ID"
+
+# Login with the returned token
+vault login
+# Paste the token
+
+# Test operations
+vault read pki_int/cert/ca  # Should work
+vault token renew  # Should work
+vault write -format=json pki_int/issue/client_role \
+  common_name="client.wifi.local" \
+  user_ids="client" \
+  ttl="30d" | tee client.json | jq  # Should work
+```
+
+### 6. Enable TLS on Vault Server
+
+⚠️ **CRITICAL**: Never send secrets over unencrypted HTTP in production!
+
+**Create server certificate role:**
+
+```bash
+# Create dedicated server role for Vault
+vault write pki_int/roles/server_role \
+  max_ttl="365d" \
+  key_type=ec \
+  key_bits=256 \
+  allow_ip_sans=true \
+  allowed_domains="vault.local" \
+  allowed_bare_domains=true
+
+# Issue server certificate (replace IP with your Vault server IP)
+vault write -format=json pki_int/issue/server_role \
+  common_name="vault.local" \
+  ip_sans="192.168.12.230" \
+  ttl="365d" | \
+  tee server.json
+
+# Extract certificate and key
+jq -r .data.certificate server.json | tee server.pem
+jq -r .data.private_key server.json | tee server.key
+rm server.json
+
+# Copy to Vault server TLS directory
+cp server.key server.pem vault/tls/
+chmod 600 vault/tls/server.key
+chmod 644 vault/tls/server.pem
+```
+
+**Update Vault server configuration:**
+
+```bash
+# Edit vault/config/vault.hcl
+cat > vault/config/vault.hcl <<'EOF'
+storage "raft" {
+  path    = "/vault/data"
+  node_id = "node1"
+}
+
+listener "tcp" {
+  address       = "0.0.0.0:8200"
+  tls_disable   = 0
+  tls_cert_file = "/vault/tls/server.pem"
+  tls_key_file  = "/vault/tls/server.key"
+}
+
+api_addr     = "https://vault:8200"
+cluster_addr = "https://vault:8201"
+ui           = true
+disable_mlock = false
+EOF
+
+# Restart Vault server
+docker compose restart vault
+docker logs vault
+```
+
+**Test TLS connection:**
+
+```bash
+# Try HTTP (should fail)
+export VAULT_ADDR=http://192.168.12.230:8200
+vault status  # Error: connection refused
+
+# Try HTTPS without CA (should fail)
+export VAULT_ADDR=https://192.168.12.230:8200
+vault status  # Error: certificate validation failed
+
+# Try HTTPS with CA chain (should work)
+export VAULT_ADDR=https://192.168.12.230:8200
+export VAULT_CACERT=/path/to/ca_chain.pem
+vault status  # Success!
+```
+
+## 🤖 Vault Agent Setup
+
+### 7. Prepare Agent Directory Structure
+
+```bash
+# Create token storage directory
+sudo mkdir -p /run/vault/
+sudo chown vault: /run/vault/
+sudo chmod 700 /run/vault/
+
+# Create certificate output directory
+sudo mkdir -p /var/lib/vault-agent/certs/
+sudo chown -R vault: /var/lib/vault-agent/certs/
+sudo chmod 755 /var/lib/vault-agent/certs/
+
+# Create configuration directory
+sudo mkdir -p /etc/vault.d/
+```
+
+### 8. Configure Vault Agent
+
+**Create AppRole credentials:**
+
+```bash
+# Get Role ID from Vault
+vault read auth/approle/role/app-role/role-id
+
+# Save Role ID to file
+sudo bash -c 'cat > /etc/vault.d/role_id <<EOF
+<your-role-id>
+EOF'
+
+# Generate and save Secret ID
+vault write -f auth/approle/role/app-role/secret-id
+
+sudo bash -c 'cat > /etc/vault.d/secret_id <<EOF
+<your-secret-id>
+EOF'
+
+# Secure credentials
+sudo chmod 600 /etc/vault.d/role_id
+sudo chmod 600 /etc/vault.d/secret_id
+sudo chown vault: /etc/vault.d/role_id
+sudo chown vault: /etc/vault.d/secret_id
+```
+
+**Create main Agent configuration:**
+
+```bash
+sudo cat > /etc/vault.d/vault-agent.hcl <<'EOF'
+vault {
+  address = "https://192.168.12.230:8200"
+  ca_cert = "/etc/vault.d/ca_chain.pem"
+}
+
+auto_auth {
+  method {
+    type = "approle"
+    
+    config = {
+      role_id_file_path   = "/etc/vault.d/role_id"
+      secret_id_file_path = "/etc/vault.d/secret_id"
+      remove_secret_id_file_after_reading = false
+    }
+  }
+
+  sink {
+    type = "file"
+    config = {
+      path = "/run/vault/token"
+      mode = 0600
+    }
+  }
+}
+
+template {
+  source      = "/etc/vault.d/client_cert.tpl"
+  destination = "/var/lib/vault-agent/certs/client.pem"
+  perms       = 0644
+}
+
+template {
+  source      = "/etc/vault.d/client_key.tpl"
+  destination = "/var/lib/vault-agent/certs/client.key"
+  perms       = 0600
+}
+EOF
+
+sudo chown vault: /etc/vault.d/vault-agent.hcl
+sudo chmod 640 /etc/vault.d/vault-agent.hcl
+```
+
+**Copy CA chain to agent:**
+
+```bash
+# Copy CA chain for TLS verification
+sudo cp ca_chain.pem /etc/vault.d/
+sudo chmod 644 /etc/vault.d/ca_chain.pem
+```
+
+### 9. Create Certificate Templates
+
+**Client certificate template:**
+
+```bash
+sudo cat > /etc/vault.d/client_cert.tpl <<'EOF'
+{{ with secret "pki_int/issue/client_role" "common_name=client.wifi.local" "user_ids=client" "ttl=30d" }}
+{{ .Data.certificate }}
+{{ end }}
+EOF
+
+sudo chmod 644 /etc/vault.d/client_cert.tpl
+```
+
+**Private key template:**
+
+```bash
+sudo cat > /etc/vault.d/client_key.tpl <<'EOF'
+{{ with secret "pki_int/issue/client_role" "common_name=client.wifi.local" "user_ids=client" "ttl=30d" }}
+{{ .Data.private_key }}
+{{ end }}
+EOF
+
+sudo chmod 644 /etc/vault.d/client_key.tpl
+```
+
+### 10. Create Systemd Service
+
+**Service unit file:**
+
+```bash
+sudo cat > /usr/lib/systemd/system/vault-agent.service <<'EOF'
+[Unit]
+Description=Vault Agent
+Documentation=https://www.vaultproject.io/docs/agent
+Requires=network-online.target
+After=network-online.target
+ConditionFileNotEmpty=/etc/vault.d/vault-agent.hcl
+
+[Service]
+Type=notify
+EnvironmentFile=/etc/vault.d/vault-agent.env
+User=vault
+Group=vault
+ExecStart=/usr/bin/vault agent -config=/etc/vault.d/vault-agent.hcl
+ExecReload=/bin/kill -HUP $MAINPID
+KillMode=process
+KillSignal=SIGTERM
+Restart=on-failure
+RestartSec=5
+TimeoutStopSec=30
+LimitNOFILE=65536
+LimitMEMLOCK=infinity
+
+[Install]
+WantedBy=multi-user.target
+EOF
+```
+
+**Environment file:**
+
+```bash
+sudo cat > /etc/vault.d/vault-agent.env <<'EOF'
+VAULT_ADDR=https://192.168.12.230:8200
+VAULT_CACERT=/etc/vault.d/ca_chain.pem
+EOF
+
+sudo chmod 644 /etc/vault.d/vault-agent.env
+```
+
+**Verify configuration structure:**
+
+```bash
+tree /etc/vault.d/
+# Expected output:
+# /etc/vault.d/
+# ├── ca_chain.pem
+# ├── client_cert.tpl
+# ├── client_key.tpl
+# ├── role_id
+# ├── secret_id
+# ├── vault-agent.env
+# └── vault-agent.hcl
+```
+
+### 11. Start Vault Agent Service
+
+```bash
+# Reload systemd daemon
+sudo systemctl daemon-reload
+
+# Enable service to start on boot
+sudo systemctl enable vault-agent
+
+# Start service
+sudo systemctl start vault-agent
+
+# Check status
+sudo systemctl status vault-agent
+
+# View logs
+journalctl -u vault-agent -f
+```
+
+### 12. Verify Agent Operation
+
+```bash
+# Check if certificates were created
+ls -la /var/lib/vault-agent/certs/
+
+# View token (should exist after first auth)
+sudo cat /run/vault/token
+
+# Lookup token details (from authenticated terminal)
+vault token lookup $(sudo cat /run/vault/token)
+
+# Verify certificate validity
+openssl x509 -in /var/lib/vault-agent/certs/client.pem -noout -text
+openssl x509 -in /var/lib/vault-agent/certs/client.pem -noout -dates
+
+# Test certificate renewal by restarting agent
+sudo systemctl restart vault-agent
+openssl x509 -in /var/lib/vault-agent/certs/client.pem -noout -dates
+# Note: issue date should be updated
+```
+
+## 🔍 Monitoring and Troubleshooting
+
+### View Agent Logs
+
+```bash
+# Real-time logs
+journalctl -u vault-agent -f
+
+# Last 100 lines
+journalctl -u vault-agent -n 100
+
+# Logs since boot
+journalctl -u vault-agent -b
+
+# Filter for errors
+journalctl -u vault-agent -p err
+```
+
+### Common Issues
+
+**Agent fails to start:**
+```bash
+# Check configuration syntax
+vault agent -config=/etc/vault.d/vault-agent.hcl -log-level=debug
+
+# Verify file permissions
+ls -la /etc/vault.d/
+ls -la /run/vault/
+ls -la /var/lib/vault-agent/certs/
+
+# Check if vault user exists
+id vault
+```
+
+**Authentication failures:**
+```bash
+# Verify AppRole credentials
+vault read auth/approle/role/app-role/role-id
+vault write -f auth/approle/role/app-role/secret-id
+
+# Test manual authentication
+vault write auth/approle/login \
+  role_id=$(cat /etc/vault.d/role_id) \
+  secret_id=$(cat /etc/vault.d/secret_id)
+
+# Check TLS connectivity
+curl --cacert /etc/vault.d/ca_chain.pem https://192.168.12.230:8200/v1/sys/health
+```
+
+**Certificate not renewing:**
+```bash
+# Check agent logs for renewal attempts
+journalctl -u vault-agent | grep -i "renew"
+
+# Verify token validity
+vault token lookup $(sudo cat /run/vault/token)
+
+# Force renewal by restarting agent
+sudo systemctl restart vault-agent
+```
+
+## 📊 Token Lifecycle
+
+Understanding token TTL vs Max TTL:
+
+```
+Token Created
+│
+├─> TTL: 1 hour (renewable)
+│   │
+│   ├─> Agent renews token every ~50 minutes
+│   ├─> Token TTL resets to 1 hour each time
+│   └─> This continues until...
+│
+└─> Max TTL: 24 hours (absolute limit)
+    │
+    └─> After 24 hours total:
+        - Token can no longer be renewed
+        - Agent re-authenticates with AppRole
+        - New token issued with fresh 24-hour max TTL
+```
+
+**Monitor token lifecycle:**
+
+```bash
+# Watch token renewals in real-time
+journalctl -u vault-agent -f | grep -i token
+
+# Check current token details
+vault token lookup $(sudo cat /run/vault/token)
+```
+
+## 🎯 Client WiFi Configuration
+
+Now that certificates are automatically managed, configure WiFi on the client:
+
+### Linux (NetworkManager)
+
+```bash
+nmcli connection add type wifi ifname wlan0 con-name "WiFi-EAP-TLS" \
+    802-11-wireless.ssid "YourWiFiSSID" \
+    802-11-wireless-security.key-mgmt wpa-eap \
+    802-1x.eap tls \
+    802-1x.identity "client" \
+    802-1x.ca-cert /etc/vault.d/ca_chain.pem \
+    802-1x.client-cert /var/lib/vault-agent/certs/client.pem \
+    802-1x.private-key /var/lib/vault-agent/certs/client.key
+
+# Connect
+nmcli connection up "WiFi-EAP-TLS"
+```
+
+### Windows
+
+1. Copy files to Windows-accessible location
+2. Import `ca_chain.pem` to Trusted Root Certification Authorities
+3. Create PKCS#12 bundle:
+   ```bash
+   openssl pkcs12 -export -out client.p12 \
+     -inkey /var/lib/vault-agent/certs/client.key \
+     -in /var/lib/vault-agent/certs/client.pem \
+     -certfile /etc/vault.d/ca_chain.pem
+   ```
+4. Import `client.p12` to Personal certificate store
+5. Configure WiFi with certificate authentication
+
+## 🔒 Production Considerations
+
+### Security Best Practices
+
+1. **Protect AppRole Credentials**
+   ```bash
+   # Strict file permissions
+   chmod 600 /etc/vault.d/role_id
+   chmod 600 /etc/vault.d/secret_id
+   chown vault: /etc/vault.d/*_id
+   ```
+
+2. **Monitor Certificate Expiry**
+   ```bash
+   # Create monitoring script
+   cat > /usr/local/bin/check-cert-expiry.sh <<'EOF'
+   #!/bin/bash
+   CERT="/var/lib/vault-agent/certs/client.pem"
+   EXPIRY=$(openssl x509 -in "$CERT" -noout -enddate | cut -d= -f2)
+   EXPIRY_EPOCH=$(date -d "$EXPIRY" +%s)
+   NOW_EPOCH=$(date +%s)
+   DAYS_LEFT=$(( ($EXPIRY_EPOCH - $NOW_EPOCH) / 86400 ))
+   
+   if [ $DAYS_LEFT -lt 7 ]; then
+     echo "WARNING: Certificate expires in $DAYS_LEFT days"
+     exit 1
+   fi
+   exit 0
+   EOF
+   
+   chmod +x /usr/local/bin/check-cert-expiry.sh
+   ```
+
+3. **Rotate Secret IDs Periodically**
+   ```bash
+   # Generate new Secret ID
+   NEW_SECRET_ID=$(vault write -f -format=json \
+     auth/approle/role/app-role/secret-id | \
+     jq -r .data.secret_id)
+   
+   # Update file
+   echo "$NEW_SECRET_ID" | sudo tee /etc/vault.d/secret_id
+   
+   # Restart agent
+   sudo systemctl restart vault-agent
+   ```
+
+4. **Enable Audit Logging**
+   ```bash
+   # On Vault server
+   vault audit enable file file_path=/vault/logs/audit.log
+   ```
+
+### Scaling to Multiple Clients
+
+For multiple client devices, consider:
+
+1. **Unique certificates per device:**
+   - Use hostname in common name: `hostname.wifi.local`
+   - Customize templates per device
+   
+2. **Configuration management:**
+   - Use Ansible/Puppet to deploy Agent configuration
+   - Template role_id and secret_id per host
+   
+3. **Centralized monitoring:**
+   - Collect Agent logs to central logging system
+   - Alert on authentication failures
+   - Track certificate issuance/renewal
+
+## 📚 Additional Resources
+
+- [Vault Agent Documentation](https://developer.hashicorp.com/vault/docs/agent-and-proxy/agent)
+- [AppRole Auth Method](https://developer.hashicorp.com/vault/docs/auth/approle)
+- [Vault Agent Templates](https://developer.hashicorp.com/vault/docs/agent-and-proxy/agent/template)
+- [Vault Agent Caching](https://developer.hashicorp.com/vault/docs/agent-and-proxy/agent/caching)
+
+## 🎉 Summary
+
+You've now implemented a fully automated certificate lifecycle management system:
+
+✅ Certificates automatically issued and renewed  
+✅ No manual intervention required  
+✅ Secure AppRole authentication for machines  
+✅ TLS-encrypted communication with Vault  
+✅ Policy-based access control  
+✅ Token lifecycle management  
+✅ Production-ready security posture  
+
+Users can now connect to WiFi without worrying about certificate expiration. The system silently manages everything in the background!
+
 ---
 
 **Questions or issues?** Feel free to open an issue or watch the [YouTube tutorial](https://youtu.be/AW4vq8W8qOI?si=zT3tdbtp1L_7Is-p) for visual guidance.
