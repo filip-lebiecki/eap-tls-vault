@@ -2,7 +2,7 @@
 vault {
   # HTTP
   # address = "http://192.168.80.83:8200"
-  # or HTTPS
+  # HTTPS
   address = "https://192.168.80.83:8200"
   ca_cert_file = "/etc/vault.d/ca_chain.pem"
 }
