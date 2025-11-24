@@ -1,0 +1,33 @@
+# /usr/lib/systemd/system/vault-agent.service
+[Unit]
+Description="Vault Agent"
+Documentation=https://developer.hashicorp.com/vault/docs
+Requires=network-online.target
+After=network-online.target
+ConditionFileNotEmpty=/etc/vault.d/vault-agent.hcl
+StartLimitIntervalSec=60
+StartLimitBurst=3
+
+[Service]
+Type=notify
+EnvironmentFile=/etc/vault.d/vault-agent.env
+User=vault
+Group=vault
+ProtectSystem=full
+ReadWritePaths=/etc/vault.d/ /run/vault/
+RuntimeDirectory=vault
+PrivateDevices=yes
+SecureBits=keep-caps
+ExecStart=/usr/bin/vault agent -config=/etc/vault.d/vault-agent.hcl
+ExecReload=/bin/kill --signal HUP $MAINPID
+KillMode=process
+KillSignal=SIGINT
+Restart=on-failure
+RestartSec=5
+TimeoutStopSec=30
+LimitNOFILE=65536
+LimitMEMLOCK=infinity
+LimitCORE=0
+
+[Install]
+WantedBy=multi-user.target 
